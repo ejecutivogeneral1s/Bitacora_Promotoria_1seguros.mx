@@ -1,0 +1,744 @@
+/**
+ * GATILLO AUTOMÁTICO (VERSIÓN DINÁMICA E INMUNE A CAMBIOS DE COLUMNAS)
+ */
+function onEdit(e) {
+  if (!e || !e.range) return;
+
+  const nombreHojaObjetivo = "Tareas Pendientes";
+  const hojaEditada = e.source.getActiveSheet();
+  const nombreHojaEditada = hojaEditada.getName();
+  const filaEditada = e.range.getRow();
+  const columnaEditada = e.range.getColumn();
+
+  if (nombreHojaEditada !== nombreHojaObjetivo) return;
+  if (filaEditada <= 2) return; // Ignoramos encabezados
+
+  // Invocamos al radar para saber dónde está cada columna (0-based)
+  const mapa = obtenerMapaColumnas(hojaEditada);
+
+  // Convertimos las ubicaciones a números de columna (1-based) para getRange
+  // Si por alguna razón no encuentra la columna, usa un valor por defecto para no fallar
+  const colEstatus = mapa["Estatus"] !== undefined ? mapa["Estatus"] + 1 : 4;
+  const colResponsable = mapa["Responsable"] !== undefined ? mapa["Responsable"] + 1 : 6;
+  const colFechaIngreso = mapa["Fecha de ingreso a bitacora (m/d/a)"] !== undefined ? mapa["Fecha de ingreso a bitacora (m/d/a)"] + 1 : 3;
+  const colFechaTermino = mapa["FECHA DE TÉRMINO"] !== undefined ? mapa["FECHA DE TÉRMINO"] + 1 : 7;
+  const colIdTarea = mapa["ID TAREA"] !== undefined ? mapa["ID TAREA"] + 1 : 14;
+
+  const columnasGatillo = [1, 2, colEstatus, colResponsable, 8]; 
+
+  if (columnasGatillo.includes(columnaEditada)) {
+    // --- PARTE 1: FECHA DE INGRESO AUTOMÁTICA ---
+    const celdaFechaIngreso = hojaEditada.getRange(filaEditada, colFechaIngreso);
+    if (celdaFechaIngreso.getValue() === "") {
+      celdaFechaIngreso.setValue(new Date());
+    }
+   
+    // --- PARTE 2: LÓGICA DE ESTATUS "CERRADO" ---
+    if (columnaEditada === colEstatus) { 
+      const valorNuevo = e.value ? e.value : "";
+      const valorAnterior = e.oldValue ? e.oldValue : "";
+      const celdaFechaTermino = hojaEditada.getRange(filaEditada, colFechaTermino); 
+     
+      if (valorNuevo === "Cerrado") {
+        celdaFechaTermino.setValue(new Date());
+      } else if (valorAnterior === "Cerrado" && valorNuevo !== "Cerrado") {
+        celdaFechaTermino.clearContent(); 
+      }
+    }
+  }
+
+  // --- PARTE 3: CAMBIO DE RESPONSABLE ---
+  if (columnaEditada === colResponsable) {
+    const nombreNuevo = e.value ? e.value : "";
+    const nombreAnterior = e.oldValue ? e.oldValue : "";
+
+    // Si cambiaron al responsable, borramos el ID DE LA TAREA (ubicado dinámicamente)
+    if (nombreNuevo !== nombreAnterior && nombreAnterior !== undefined) {
+      const celdaIdTarea = hojaEditada.getRange(filaEditada, colIdTarea); 
+      celdaIdTarea.clearContent();
+    }
+  }
+}
+
+
+/**
+ * CREA EL MENÚ PERSONALIZADO AL ABRIR EL EXCEL
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🤖 Tareas Remotas')
+    .addItem('Sincronizar Sheets -> Tasks', 'sincronizarTareasManualmente')
+    .addItem('Sincronizar Tasks -> Sheets', 'sincronizarTasksASheets')
+    .addSeparator() 
+    .addItem('🧹 Archivar mis tareas cerradas', 'archivarMisTareasCerradas') // El botón para todos
+    .addSeparator() 
+    .addItem('📦 Archivar tareas cerradas (todos los usuarios)', 'archivarTareasCerradas') // El de superusuarios
+    .addToUi();
+}
+
+/**
+ * EL CEREBRO DEL SISTEMA (ACTUALIZADO PARA USUARIO REMOTO)
+ */
+function obtenerConfiguracion() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaConfig = ss.getSheetByName("Config");
+  
+  // 1. Ejecutivos
+  const datosEjecutivos = hojaConfig.getRange("A2:B").getValues();
+  let directorio = {};
+  datosEjecutivos.forEach(fila => {
+    let nombre = fila[0].toString().trim();
+    let correo = fila[1].toString().trim();
+    if (nombre !== "" && correo !== "" && !nombre.includes("Superusuarios")) {
+      directorio[nombre] = correo;
+    }
+  });
+  
+  // 2. Estatus Ejecutivos
+  const estatusActivos = hojaConfig.getRange("E1").getValue().toString().split(",").map(s => s.trim());
+  const estatusCierre = hojaConfig.getRange("E2").getValue().toString().split(",").map(s => s.trim());
+  const estatusRecordatorio = hojaConfig.getRange("E3").getValue().toString().split(",").map(s => s.trim());
+  
+  // 3. Estatus y Usuario REMOTO (NUEVO)
+  const estatusCierreRemoto = hojaConfig.getRange("E4").getValue().toString().split(",").map(s => s.trim());
+  const estatusActivosRemoto = hojaConfig.getRange("E5").getValue().toString().split(",").map(s => s.trim());
+  const correoRemoto = hojaConfig.getRange("E6").getValue().toString().trim(); // <-- Aquí leemos E6
+  
+  // 4. Jefazos
+  let superUsuariosRaw = hojaConfig.getRange("B19").getValue().toString();
+  let superUsuarios = superUsuariosRaw ? superUsuariosRaw.split(",").map(s => s.trim()) : [];
+  
+  const config = {
+    ejecutivos: directorio,
+    activos: estatusActivos,
+    cierre: estatusCierre,
+    recordatorios: estatusRecordatorio,
+    jefes: superUsuarios,
+    cierreRemoto: estatusCierreRemoto,
+    activosRemoto: estatusActivosRemoto,
+    correoRemoto: correoRemoto // <-- Guardamos la identidad secreta
+  };
+  
+  console.log("¡Cerebro cargado con éxito (incluyendo config Remota)!");
+  return config;
+}
+
+
+/**
+ * OBTIENE O CREA LA LISTA DE TAREAS EN GOOGLE TASKS
+ */
+function obtenerListaTareasId() {
+  const nombreLista = "Promotoria y Asincrónicas";
+  try {
+    let taskLists = Tasks.Tasklists.list().getItems();
+    if (taskLists) {
+      for (let i = 0; i < taskLists.length; i++) {
+        if (taskLists[i].title === nombreLista) return taskLists[i].getId();
+      }
+    }
+    // Si no existe, la crea automáticamente
+    let nuevaLista = { title: nombreLista };
+    return Tasks.Tasklists.insert(nuevaLista).getId();
+  } catch(e) {
+    console.log("⚠️ Error con Tasks: " + e.message);
+    return null;
+  }
+}
+
+/**
+ * PRUEBA EN SECO: Verifica cuántas tareas te tocan antes de crearlas
+ */
+function pruebaSincronizacion() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // ¡OJO! Confirma que el nombre de tu pestaña sea exactamente este:
+  const sheet = ss.getSheetByName("Tareas Pendientes"); 
+  
+  const config = obtenerConfiguracion(); // Llamamos al Cerebro
+  const miListaId = obtenerListaTareasId(); // Llamamos a Tasks
+  const correoUsuarioActual = Session.getActiveUser().getEmail();
+  
+  if (!miListaId) {
+    console.log("❌ No se pudo conectar con Google Tasks.");
+    return;
+  }
+  console.log("✅ Conectado a Tasks. ID de la lista: " + miListaId);
+  
+  // Empezamos en la fila 3 (asumiendo fila 1: notas, fila 2: encabezados)
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < startRow) {
+    console.log("No hay datos en la hoja.");
+    return;
+  }
+  
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, 12).getValues();
+  let tareasMias = 0;
+  
+  for (let i = 0; i < data.length; i++) {
+    let fila = data[i];
+    let responsable = fila[5]; // Columna F (Índice 5)
+    let estatus = fila[3];     // Columna D (Índice 3)
+    let idTarea = fila[11];    // Columna L (Índice 11)
+    
+    // Cruzamos el nombre del responsable con el directorio del Cerebro
+    let correoAsignado = config.ejecutivos[responsable ? responsable.toString().trim() : ""];
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+    
+    // Si el correo coincide con tu sesión actual, el estatus es activo y NO tiene ID de tarea aún
+    if (correoAsignado === correoUsuarioActual && config.activos.includes(estatusLimpio) && !idTarea) {
+      tareasMias++;
+    }
+  }
+  
+  console.log("📋 Encontré " + tareasMias + " tareas activas, nuevas y asignadas a tu correo (" + correoUsuarioActual + ").");
+}
+
+/**
+ * SINCRONIZACIÓN MANUAL - SHEETS -> TASKS (VERSIÓN DINÁMICA)
+ */
+function sincronizarTareasManualmente() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion(); 
+  const miListaId = obtenerListaTareasId(); 
+  const correoUsuarioActual = Session.getActiveUser().getEmail();
+  
+  if (!config || !miListaId) return;
+
+  // ¡Invocamos al radar de columnas!
+  const mapa = obtenerMapaColumnas(sheet); 
+  
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  // Leemos TODA la fila hasta la última columna disponible
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let currentRow = startRow + i;
+
+    // Buscamos los valores por el NOMBRE EXACTO de la columna
+    let tipo = rowData[mapa["Tipo"]];          
+    let aseguradora = rowData[mapa["Aseguradora"]];   
+    let fechaIngreso = rowData[mapa["Fecha de ingreso a bitacora (m/d/a)"]];  
+    let estatus = rowData[mapa["Estatus"]];       
+    let responsable = rowData[mapa["Responsable"]];   
+    let contratante = rowData[mapa["Contratante"]];
+    let agente = rowData[mapa["Agente"]];
+    let descripcion = rowData[mapa["Descripcion y comentarios"]];   
+    let fechaVencimiento = rowData[mapa["Prox. Seguimiento"]]; 
+    let idTarea = rowData[mapa["ID TAREA"]];      
+
+    let correoAsignado = config.ejecutivos[responsable ? responsable.toString().trim() : ""];
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+
+    if (correoAsignado === correoUsuarioActual && config.activos.includes(estatusLimpio) && !idTarea) {
+      
+      let fechaFormat = "";
+      if (fechaIngreso instanceof Date && !isNaN(fechaIngreso)) {
+        const meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+        fechaFormat = ` (${fechaIngreso.getDate()} ${meses[fechaIngreso.getMonth()]})`;
+      }
+      
+      // Armamos el título dinámico (si no hay contratante o agente, los omite y no deja guiones huérfanos)
+      let partesTitulo = [tipo, aseguradora, contratante, agente].filter(Boolean).join(" - ");
+      let titulo = `${partesTitulo}${fechaFormat}`;
+      
+      let nuevaTarea = { 
+        title: titulo, 
+        notes: descripcion ? descripcion.toString() : "" 
+      };
+
+      if (fechaVencimiento instanceof Date && !isNaN(fechaVencimiento)) {
+        nuevaTarea.due = new Date(fechaVencimiento.getTime() - (fechaVencimiento.getTimezoneOffset() * 60000)).toISOString();
+      }
+
+      try {
+        let tareaCreada = Tasks.Tasks.insert(nuevaTarea, miListaId);
+        
+        // Buscamos la columna exacta de "ID TAREA" para escribir (+1 porque las columnas de getRange empiezan en 1)
+        sheet.getRange(currentRow, mapa["ID TAREA"] + 1).setValue(tareaCreada.getId());
+        
+        registrarEnLog(tipo, responsable, descripcion, "Nueva tarea enviada a Google Tasks");
+      } catch (e) {
+        console.log("Error al crear tarea en fila " + currentRow + ": " + e.message);
+      }
+    }
+  }
+}
+
+
+
+
+/**
+ * EL ESCRIBANO (Log_Bot)
+ * Registra silenciosamente las acciones importantes en la pestaña Log_Bot.
+ */
+function registrarEnLog(tipo, responsable, descripcion, accion) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaLog = ss.getSheetByName("Log_Bot");
+  
+  if (!hojaLog) {
+    console.log("⚠️ No se encontró la pestaña 'Log_Bot'.");
+    return;
+  }
+  
+  const fechaActual = new Date();
+  
+  // Agregamos una nueva fila al final con las 5 columnas exactas de tu diseño
+  hojaLog.appendRow([
+    fechaActual,
+    tipo ? tipo.toString() : "",
+    responsable ? responsable.toString() : "",
+    descripcion ? descripcion.toString() : "",
+    accion
+  ]);
+}
+
+/**
+ * EL SUPERVISOR - TASKS -> SHEETS (VERSIÓN DINÁMICA)
+ */
+function sincronizarTasksASheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion();
+  const miListaId = obtenerListaTareasId();
+  const correoUsuarioActual = Session.getActiveUser().getEmail();
+  
+  if (!config || !miListaId) return;
+
+  const mapa = obtenerMapaColumnas(sheet);
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  // Leemos TODA la fila hasta la última columna
+  const numColumnas = sheet.getLastColumn();
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let currentRow = startRow + i;
+
+    let tipo = rowData[mapa["Tipo"]];        
+    let estatus = rowData[mapa["Estatus"]];     
+    let responsable = rowData[mapa["Responsable"]]; 
+    let descripcion = rowData[mapa["Descripcion y comentarios"]]; 
+    let idTarea = rowData[mapa["ID TAREA"]];    
+
+    let correoAsignado = config.ejecutivos[responsable ? responsable.toString().trim() : ""];
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+
+    let esActivo = config.activos.includes(estatusLimpio);
+    let esCerrado = config.cierre.includes(estatusLimpio);
+
+    if (correoAsignado === correoUsuarioActual && idTarea && (esActivo || esCerrado)) {
+      try {
+        let tareaEnNube = Tasks.Tasks.get(miListaId, idTarea);
+        
+        // Sumamos +1 a las columnas porque getRange empieza a contar en 1
+        if (esActivo && tareaEnNube.status === "completed") {
+          sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue("Cerrado");
+          sheet.getRange(currentRow, mapa["FECHA DE TÉRMINO"] + 1).setValue(new Date());
+          
+          registrarEnLog(tipo, responsable, descripcion, "Tarea completada desde tasks. Actualizada a Cerrado.");
+        }
+        else if (esCerrado && tareaEnNube.status === "needsAction") {
+          sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue("Pendiente"); 
+          sheet.getRange(currentRow, mapa["FECHA DE TÉRMINO"] + 1).clearContent(); 
+          
+          registrarEnLog(tipo, responsable, descripcion, "Tarea REABIERTA desde tasks. Estatus devuelto a Pendiente.");
+        }
+      } catch (e) {
+        console.log(`⚠️ Error al revisar tarea ${idTarea} en fila ${currentRow}: ${e.message}`);
+      }
+    }
+  }
+}
+
+/**
+ * ARCHIVADO MASIVO (SOLO SUPER USUARIOS) - VERSIÓN DINÁMICA
+ */
+function archivarTareasCerradas() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetPendientes = ss.getSheetByName("Tareas Pendientes");
+  const sheetHistorial = ss.getSheetByName("Historial_Tareas");
+
+  const config = obtenerConfiguracion();
+  const correoActual = Session.getActiveUser().getEmail();
+
+  if (!config.jefes.includes(correoActual)) {
+    SpreadsheetApp.getUi().alert("⛔ Acceso denegado: Solo los Súper Usuarios pueden archivar tareas.");
+    return;
+  }
+
+  const mapa = obtenerMapaColumnas(sheetPendientes);
+  const startRow = 3;
+  const lastRow = sheetPendientes.getLastRow();
+  
+  if (lastRow < startRow) {
+    SpreadsheetApp.getUi().alert("No hay datos para revisar.");
+    return;
+  }
+
+  // Obtenemos dinámicamente cuántas columnas hay para copiarlas TODAS
+  const numColumnas = sheetPendientes.getLastColumn();
+  const data = sheetPendientes.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+  
+  let filasAArchivar = [];
+  let indicesABorrar = [];
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let estatus = rowData[mapa["Estatus"]];
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+
+    if (config.cierre.includes(estatusLimpio)) {
+      filasAArchivar.push(rowData);
+      indicesABorrar.push(startRow + i);
+    }
+  }
+
+  if (filasAArchivar.length > 0) {
+    let datosColA = sheetHistorial.getRange("A:A").getValues();
+    let ultimaFilaReal = 1; 
+    
+    for (let k = datosColA.length - 1; k >= 0; k--) {
+      if (datosColA[k][0] !== "") {
+        ultimaFilaReal = k + 1;
+        break; 
+      }
+    }
+
+    // Pegamos usando la cantidad de columnas dinámicas (numColumnas)
+    sheetHistorial.getRange(ultimaFilaReal + 1, 1, filasAArchivar.length, numColumnas).setValues(filasAArchivar);
+
+    for (let j = indicesABorrar.length - 1; j >= 0; j--) {
+      sheetPendientes.deleteRow(indicesABorrar[j]);
+    }
+
+    registrarEnLog("Mantenimiento", "Sistema", `Se archivaron ${filasAArchivar.length} tareas.`, `Archivado Masivo ejecutado por: ${correoActual}`);
+    SpreadsheetApp.getUi().alert(`✅ ¡Limpieza completada!\nSe movieron ${filasAArchivar.length} tareas cerradas al Historial.`);
+  } else {
+    SpreadsheetApp.getUi().alert("No hay tareas 'Cerradas' listas para archivar.");
+  }
+}
+
+
+/**
+ * MAPA DE COLUMNAS DINÁMICO
+ * Lee la fila 2 para saber en qué posición exacta está cada columna.
+ * Esto nos hace inmunes a cambios en el orden de las columnas.
+ */
+function obtenerMapaColumnas(hoja) {
+  // Leemos toda la fila 2
+  const encabezados = hoja.getRange(2, 1, 1, hoja.getLastColumn()).getValues()[0];
+  let mapa = {};
+  
+  for (let i = 0; i < encabezados.length; i++) {
+    // Limpiamos el texto (quitamos saltos de línea invisibles y espacios extra)
+    let nombre = encabezados[i].toString().replace(/\n/g, "").trim();
+    if (nombre !== "") {
+      mapa[nombre] = i; // Guardamos el índice (0-based)
+    }
+  }
+  return mapa;
+}
+
+/**
+ * BOT DE RECORDATORIOS POR CORREO
+ * Busca tareas estancadas y envía un correo resumen a cada responsable.
+ */
+function enviarRecordatoriosDiarios() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion();
+  const mapa = obtenerMapaColumnas(sheet);
+  
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  const numColumnas = sheet.getLastColumn();
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  // Objeto para agrupar las tareas por correo de ejecutivo
+  let correosAEnviar = {};
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let estatus = rowData[mapa["Estatus"]];     
+    let responsable = rowData[mapa["Responsable"]]; 
+    let tipo = rowData[mapa["Tipo"]];
+    let aseguradora = rowData[mapa["Aseguradora"]];
+    let contratante = rowData[mapa["Contratante"]];
+
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+    let nombreRespLimpio = responsable ? responsable.toString().trim() : "";
+    let correoAsignado = config.ejecutivos[nombreRespLimpio];
+
+    // Si el estatus está en la lista de recordatorios y el responsable tiene correo
+    if (config.recordatorios.includes(estatusLimpio) && correoAsignado) {
+      
+      // Si es la primera vez que encontramos a este ejecutivo, le creamos su "bandeja"
+      if (!correosAEnviar[correoAsignado]) {
+        correosAEnviar[correoAsignado] = {
+          nombre: nombreRespLimpio,
+          tareas: []
+        };
+      }
+      
+      // Agregamos la tarea a su bandeja
+      let tituloCorto = [tipo, aseguradora, contratante].filter(Boolean).join(" - ");
+      correosAEnviar[correoAsignado].tareas.push(`- [${estatusLimpio}] ${tituloCorto}`);
+    }
+  }
+
+  // Ahora, enviamos los correos agrupados
+  let correosEnviados = 0;
+  for (let correoDestino in correosAEnviar) {
+    let datosDestinatario = correosAEnviar[correoDestino];
+    
+    let asunto = `⏰ Tareas Pendientes de Acción - Bitácora Promotoría`;
+    
+    // Armamos el cuerpo usando etiquetas HTML (<br> en lugar de \n para los saltos de línea)
+    let cuerpoHtml = `Hola ${datosDestinatario.nombre},<br><br>`;
+    cuerpoHtml += `El sistema ha detectado que tienes las siguientes tareas en espera de acción (Estatus: <b>${config.recordatorios.join(" / ")}</b>):<br><br>`;
+    
+    // Unimos las tareas con saltos de línea de HTML
+    cuerpoHtml += datosDestinatario.tareas.join("<br>");
+    
+    // AQUÍ ESTÁ LA MAGIA DEL ENLACE:
+    cuerpoHtml += `<br><br>Por favor revisa la <a href="https://docs.google.com/spreadsheets/d/1Qs0KAWmmrf5ofYbmGfspWWz1ZqtHNX6W6PUVsEcXtuU/" target="_blank">Bitácora de Tareas</a> para actualizarlas.<br><br>Saludos,<br>🤖 Bot de Tareas Remotas`;
+
+    try {
+      // Cambiamos la forma de enviar para que Google sepa que es un correo con diseño (HTML)
+      MailApp.sendEmail({
+        to: correoDestino,
+        subject: asunto,
+        htmlBody: cuerpoHtml
+      });
+      correosEnviados++;
+      registrarEnLog("Sistema", datosDestinatario.nombre, `Se envió correo recordatorio con ${datosDestinatario.tareas.length} tareas.`, "Recordatorio Enviado");
+    } catch (e) {
+      console.log(`Error enviando correo a ${correoDestino}: ` + e.message);
+    }
+  }
+  console.log(`Se enviaron ${correosEnviados} correos de recordatorio.`);
+}
+
+/**
+ * ARCHIVADO INDIVIDUAL (CUALQUIER USUARIO) - VERSIÓN DINÁMICA
+ * Mueve al Historial solo las tareas cerradas del usuario actual.
+ */
+function archivarMisTareasCerradas() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetPendientes = ss.getSheetByName("Tareas Pendientes");
+  const sheetHistorial = ss.getSheetByName("Historial_Tareas");
+
+  const config = obtenerConfiguracion();
+  const correoUsuarioActual = Session.getActiveUser().getEmail();
+
+  const mapa = obtenerMapaColumnas(sheetPendientes);
+  const startRow = 3;
+  const lastRow = sheetPendientes.getLastRow();
+
+  if (lastRow < startRow) {
+    SpreadsheetApp.getUi().alert("No hay datos para revisar.");
+    return;
+  }
+
+  const numColumnas = sheetPendientes.getLastColumn();
+  const data = sheetPendientes.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  let filasAArchivar = [];
+  let indicesABorrar = [];
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let estatus = rowData[mapa["Estatus"]];
+    let responsable = rowData[mapa["Responsable"]];
+
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+    let nombreRespLimpio = responsable ? responsable.toString().trim() : "";
+    let correoAsignado = config.ejecutivos[nombreRespLimpio];
+
+    // La condición mágica: El estatus es de cierre Y el correo asignado es igual al mío
+    if (config.cierre.includes(estatusLimpio) && correoAsignado === correoUsuarioActual) {
+      filasAArchivar.push(rowData);
+      indicesABorrar.push(startRow + i);
+    }
+  }
+
+  if (filasAArchivar.length > 0) {
+    let datosColA = sheetHistorial.getRange("A:A").getValues();
+    let ultimaFilaReal = 1;
+
+    for (let k = datosColA.length - 1; k >= 0; k--) {
+      if (datosColA[k][0] !== "") {
+        ultimaFilaReal = k + 1;
+        break;
+      }
+    }
+
+    // Pegamos usando la cantidad de columnas dinámicas (numColumnas)
+    sheetHistorial.getRange(ultimaFilaReal + 1, 1, filasAArchivar.length, numColumnas).setValues(filasAArchivar);
+
+    // Borramos de abajo hacia arriba de forma segura
+    for (let j = indicesABorrar.length - 1; j >= 0; j--) {
+      sheetPendientes.deleteRow(indicesABorrar[j]);
+    }
+
+    registrarEnLog("Mantenimiento", "Usuario", `Se archivaron ${filasAArchivar.length} tareas propias.`, `Archivado Individual ejecutado por: ${correoUsuarioActual}`);
+    SpreadsheetApp.getUi().alert(`✅ ¡Tu limpieza está lista!\nSe movieron ${filasAArchivar.length} de tus tareas cerradas al Historial.`);
+  } else {
+    SpreadsheetApp.getUi().alert("No tienes tareas 'Cerradas' listas para archivar.");
+  }
+}
+
+
+/**
+ * 🌐 CREADOR DE TAREAS REMOTAS (Sheets -> Tasks)
+ * Usa exclusivamente ID TAREA REMOTO y valida el correo E6.
+ */
+function sincronizarTareasRemotas() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion(); 
+  const miListaId = obtenerListaTareasId(); 
+  const correoUsuarioActual = Session.getActiveUser().getEmail(); // <-- Saber quién presiona el botón
+  
+  if (!config || !miListaId) return;
+
+  const mapa = obtenerMapaColumnas(sheet); 
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let currentRow = startRow + i;
+
+    let tipo = rowData[mapa["Tipo"]];          
+    let aseguradora = rowData[mapa["Aseguradora"]];   
+    let fechaIngreso = rowData[mapa["Fecha de ingreso a bitacora (m/d/a)"]];  
+    let estatus = rowData[mapa["Estatus"]];       
+    let contratante = rowData[mapa["Contratante"]];
+    let agente = rowData[mapa["Agente"]];
+    let descripcion = rowData[mapa["Descripcion y comentarios"]];   
+    let fechaVencimiento = rowData[mapa["Prox. Seguimiento"]]; 
+    let idTareaRemoto = rowData[mapa["ID TAREA REMOTO"]]; // <-- Buscamos en el carril correcto     
+    let asignacionRemota = rowData[mapa["Asignacion remota"]];
+
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+    let esRemoto = (asignacionRemota === true || asignacionRemota === "TRUE" || asignacionRemota === "true");
+
+    // CADENERO: Es remoto + Soy el usuario remoto autorizado + Estatus activo remoto + NO tengo ID remoto
+    if (esRemoto && correoUsuarioActual === config.correoRemoto && config.activosRemoto.includes(estatusLimpio) && !idTareaRemoto) {
+      
+      let fechaFormat = "";
+      if (fechaIngreso instanceof Date && !isNaN(fechaIngreso)) {
+        const meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+        fechaFormat = ` (${fechaIngreso.getDate()} ${meses[fechaIngreso.getMonth()]})`;
+      }
+      
+      let partesTitulo = ["🌐 REMOTO", tipo, aseguradora, contratante, agente].filter(Boolean).join(" - ");
+      let titulo = `${partesTitulo}${fechaFormat}`;
+      
+      let nuevaTarea = { 
+        title: titulo, 
+        notes: descripcion ? descripcion.toString() : "" 
+      };
+
+      if (fechaVencimiento instanceof Date && !isNaN(fechaVencimiento)) {
+        nuevaTarea.due = new Date(fechaVencimiento.getTime() - (fechaVencimiento.getTimezoneOffset() * 60000)).toISOString();
+      }
+
+      try {
+        let tareaCreada = Tasks.Tasks.insert(nuevaTarea, miListaId);
+        // Escribimos en el carril correcto: ID TAREA REMOTO
+        sheet.getRange(currentRow, mapa["ID TAREA REMOTO"] + 1).setValue(tareaCreada.getId());
+        registrarEnLog(tipo, "Usuario Remoto", descripcion, "Nueva tarea REMOTA enviada a Google Tasks");
+      } catch (e) {
+        console.log("Error al crear tarea remota en fila " + currentRow + ": " + e.message);
+      }
+    }
+  }
+}
+
+/**
+ * 🌐 EL SUPERVISOR REMOTO (Tasks -> Sheets)
+ * Lee ID TAREA REMOTO y valida la identidad del correo en E6.
+ */
+function sincronizarTasksASheetsRemotas() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion();
+  const miListaId = obtenerListaTareasId();
+  const correoUsuarioActual = Session.getActiveUser().getEmail(); // <-- Seguridad
+  
+  if (!config || !miListaId) return;
+
+  const mapa = obtenerMapaColumnas(sheet);
+  const startRow = 3; 
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  const numColumnas = sheet.getLastColumn();
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let currentRow = startRow + i;
+
+    let tipo = rowData[mapa["Tipo"]];        
+    let estatus = rowData[mapa["Estatus"]];     
+    let descripcion = rowData[mapa["Descripcion y comentarios"]]; 
+    let idTareaRemoto = rowData[mapa["ID TAREA REMOTO"]]; // <-- Carril remoto
+    let asignacionRemota = rowData[mapa["Asignacion remota"]];
+
+    let estatusLimpio = estatus ? estatus.toString().trim() : "";
+    let esRemoto = (asignacionRemota === true || asignacionRemota === "TRUE" || asignacionRemota === "true");
+
+    let esActivo = config.activosRemoto.includes(estatusLimpio);
+    let esCerrado = config.cierreRemoto.includes(estatusLimpio);
+
+    // CADENERO: Es remoto + Soy el usuario autorizado + Tiene ID Remoto + Estatus válido
+    if (esRemoto && correoUsuarioActual === config.correoRemoto && idTareaRemoto && (esActivo || esCerrado)) {
+      try {
+        let tareaEnNube = Tasks.Tasks.get(miListaId, idTareaRemoto);
+        
+        if (esActivo && tareaEnNube.status === "completed") {
+          let estatusNuevo = config.cierreRemoto[0] || "Cerrado"; 
+          sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue(estatusNuevo);
+          sheet.getRange(currentRow, mapa["FECHA DE TÉRMINO"] + 1).setValue(new Date());
+          registrarEnLog(tipo, "Usuario Remoto", descripcion, `Tarea remota completada. Actualizada a ${estatusNuevo}.`);
+        }
+        else if (esCerrado && tareaEnNube.status === "needsAction") {
+          let estatusReabierto = config.activosRemoto[0] || "Pendiente";
+          sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue(estatusReabierto); 
+          sheet.getRange(currentRow, mapa["FECHA DE TÉRMINO"] + 1).clearContent(); 
+          registrarEnLog(tipo, "Usuario Remoto", descripcion, `Tarea remota REABIERTA. Estatus devuelto a ${estatusReabierto}.`);
+        }
+      } catch (e) {
+        console.log(`⚠️ Error al revisar tarea remota ${idTareaRemoto} en fila ${currentRow}: ${e.message}`);
+      }
+    }
+  }
+}
