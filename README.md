@@ -15,7 +15,7 @@ Sistema bidireccional (Sheets ↔ Tasks) en Apps Script. Automatiza asignación,
 
 * **Google Apps Script** (V8)
 * **Google Sheets API**
-* **Google Tasks API** (Advanced Services)
+* **Google Tasks API** 
 
 ## ⚙️ Configuración Rápida (Deploy)
 
