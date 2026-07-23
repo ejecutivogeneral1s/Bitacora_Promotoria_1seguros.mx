@@ -392,7 +392,6 @@ function archivarTareasCerradas() {
   const numColumnas = sheetPendientes.getLastColumn();
   const data = sheetPendientes.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
   
-  let filasAArchivar = [];
   let indicesABorrar = [];
 
   for (let i = 0; i < data.length; i++) {
@@ -401,12 +400,11 @@ function archivarTareasCerradas() {
     let estatusLimpio = estatus ? estatus.toString().trim() : "";
 
     if (config.cierre.includes(estatusLimpio)) {
-      filasAArchivar.push(rowData);
       indicesABorrar.push(startRow + i);
     }
   }
 
-  if (filasAArchivar.length > 0) {
+  if (indicesABorrar.length > 0) {
     let datosColA = sheetHistorial.getRange("A:A").getValues();
     let ultimaFilaReal = 1; 
     
@@ -417,15 +415,23 @@ function archivarTareasCerradas() {
       }
     }
 
-    // Pegamos usando la cantidad de columnas dinámicas (numColumnas)
-    sheetHistorial.getRange(ultimaFilaReal + 1, 1, filasAArchivar.length, numColumnas).setValues(filasAArchivar);
+    // Copiamos fila por fila usando copyTo de forma segura para preservar valores y formatos de fechas
+    for (let j = 0; j < indicesABorrar.length; j++) {
+      let filaOrigen = indicesABorrar[j];
+      let filaDestino = ultimaFilaReal + 1 + j;
+      let rangoOrigen = sheetPendientes.getRange(filaOrigen, 1, 1, numColumnas);
+      let rangoDestino = sheetHistorial.getRange(filaDestino, 1, 1, numColumnas);
+
+      rangoOrigen.copyTo(rangoDestino, SpreadsheetApp.CopyPasteType.PASTE_VALUES, false);
+      rangoOrigen.copyTo(rangoDestino, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    }
 
     for (let j = indicesABorrar.length - 1; j >= 0; j--) {
       sheetPendientes.deleteRow(indicesABorrar[j]);
     }
 
-    registrarEnLog("Mantenimiento", "Sistema", `Se archivaron ${filasAArchivar.length} tareas.`, `Archivado Masivo ejecutado por: ${correoActual}`);
-    SpreadsheetApp.getUi().alert(`✅ ¡Limpieza completada!\nSe movieron ${filasAArchivar.length} tareas cerradas al Historial.`);
+    registrarEnLog("Mantenimiento", "Sistema", `Se archivaron ${indicesABorrar.length} tareas.`, `Archivado Masivo ejecutado por: ${correoActual}`);
+    SpreadsheetApp.getUi().alert(`✅ ¡Limpieza completada!\nSe movieron ${indicesABorrar.length} tareas cerradas al Historial.`);
   } else {
     SpreadsheetApp.getUi().alert("No hay tareas 'Cerradas' listas para archivar.");
   }
@@ -561,7 +567,6 @@ function archivarMisTareasCerradas() {
   const numColumnas = sheetPendientes.getLastColumn();
   const data = sheetPendientes.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
 
-  let filasAArchivar = [];
   let indicesABorrar = [];
 
   for (let i = 0; i < data.length; i++) {
@@ -575,12 +580,11 @@ function archivarMisTareasCerradas() {
 
     // La condición mágica: El estatus es de cierre Y el correo asignado es igual al mío
     if (config.cierre.includes(estatusLimpio) && correoAsignado === correoUsuarioActual) {
-      filasAArchivar.push(rowData);
       indicesABorrar.push(startRow + i);
     }
   }
 
-  if (filasAArchivar.length > 0) {
+  if (indicesABorrar.length > 0) {
     let datosColA = sheetHistorial.getRange("A:A").getValues();
     let ultimaFilaReal = 1;
 
@@ -591,16 +595,24 @@ function archivarMisTareasCerradas() {
       }
     }
 
-    // Pegamos usando la cantidad de columnas dinámicas (numColumnas)
-    sheetHistorial.getRange(ultimaFilaReal + 1, 1, filasAArchivar.length, numColumnas).setValues(filasAArchivar);
+    // Copiamos fila por fila usando copyTo de forma segura para preservar valores y formatos de fechas
+    for (let j = 0; j < indicesABorrar.length; j++) {
+      let filaOrigen = indicesABorrar[j];
+      let filaDestino = ultimaFilaReal + 1 + j;
+      let rangoOrigen = sheetPendientes.getRange(filaOrigen, 1, 1, numColumnas);
+      let rangoDestino = sheetHistorial.getRange(filaDestino, 1, 1, numColumnas);
+
+      rangoOrigen.copyTo(rangoDestino, SpreadsheetApp.CopyPasteType.PASTE_VALUES, false);
+      rangoOrigen.copyTo(rangoDestino, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    }
 
     // Borramos de abajo hacia arriba de forma segura
     for (let j = indicesABorrar.length - 1; j >= 0; j--) {
       sheetPendientes.deleteRow(indicesABorrar[j]);
     }
 
-    registrarEnLog("Mantenimiento", "Usuario", `Se archivaron ${filasAArchivar.length} tareas propias.`, `Archivado Individual ejecutado por: ${correoUsuarioActual}`);
-    SpreadsheetApp.getUi().alert(`✅ ¡Tu limpieza está lista!\nSe movieron ${filasAArchivar.length} de tus tareas cerradas al Historial.`);
+    registrarEnLog("Mantenimiento", "Usuario", `Se archivaron ${indicesABorrar.length} tareas propias.`, `Archivado Individual ejecutado por: ${correoUsuarioActual}`);
+    SpreadsheetApp.getUi().alert(`✅ ¡Tu limpieza está lista!\nSe movieron ${indicesABorrar.length} de tus tareas cerradas al Historial.`);
   } else {
     SpreadsheetApp.getUi().alert("No tienes tareas 'Cerradas' listas para archivar.");
   }
