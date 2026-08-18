@@ -69,11 +69,91 @@ function onOpen() {
   ui.createMenu('🤖 Tareas Remotas')
     .addItem('Sincronizar Sheets -> Tasks', 'sincronizarTareasManualmente')
     .addItem('Sincronizar Tasks -> Sheets', 'sincronizarTasksASheets')
+    .addSeparator()
+    .addItem('🔄 Actualizar estatus por seguimiento', 'actualizarEstatusPorSeguimiento')
     .addSeparator() 
     .addItem('🧹 Archivar mis tareas cerradas', 'archivarMisTareasCerradas') // El botón para todos
     .addSeparator() 
     .addItem('📦 Archivar tareas cerradas (todos los usuarios)', 'archivarTareasCerradas') // El de superusuarios
     .addToUi();
+}
+
+/**
+ * REVISA FECHA DE PRÓXIMO SEGUIMIENTO Y ACTUALIZA ESTATUS AUTOMÁTICAMENTE
+ */
+function actualizarEstatusPorSeguimiento() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Tareas Pendientes");
+  if (!sheet) return;
+
+  const config = obtenerConfiguracion();
+  const mapa = obtenerMapaColumnas(sheet);
+
+  const startRow = 3;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return;
+
+  const numColumnas = sheet.getLastColumn();
+  const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  // Fecha actual normalizada a media noche (00:00:00)
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  let cambiosRealizados = 0;
+
+  for (let i = 0; i < data.length; i++) {
+    let rowData = data[i];
+    let currentRow = startRow + i;
+
+    let estatusActual = rowData[mapa["Estatus"]];
+    let estatusLimpio = estatusActual ? estatusActual.toString().trim() : "";
+
+    // Si la tarea está cerrada (o en config.cierre), se omite
+    if (config.cierre.includes(estatusLimpio) || estatusLimpio === "Cerrado") {
+      continue;
+    }
+
+    let fechaSeguimientoRaw = rowData[mapa["Prox. Seguimiento"]];
+    let nuevoEstatus = "";
+
+    // Verificar si es fecha válida
+    let esFechaValida = fechaSeguimientoRaw instanceof Date && !isNaN(fechaSeguimientoRaw);
+
+    if (!esFechaValida) {
+      nuevoEstatus = "Sin respuesta";
+    } else {
+      let fechaSeg = new Date(fechaSeguimientoRaw);
+      fechaSeg.setHours(0, 0, 0, 0);
+
+      if (fechaSeg.getTime() > hoy.getTime()) {
+        nuevoEstatus = "En espera";
+      } else if (fechaSeg.getTime() < hoy.getTime()) {
+        nuevoEstatus = "Sin respuesta";
+      } else {
+        nuevoEstatus = estatusLimpio;
+      }
+    }
+
+    // Solo actualizar si hay un cambio real de estatus
+    if (nuevoEstatus && nuevoEstatus !== estatusLimpio) {
+      sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue(nuevoEstatus);
+
+      let tipo = rowData[mapa["Tipo"]];
+      let responsable = rowData[mapa["Responsable"]];
+      let descripcion = rowData[mapa["Descripcion y comentarios"]];
+
+      registrarEnLog(
+        tipo,
+        responsable,
+        descripcion,
+        `Estatus actualizado de '${estatusLimpio}' a '${nuevoEstatus}' por fecha de Prox. Seguimiento`
+      );
+      cambiosRealizados++;
+    }
+  }
+
+  console.log(`Se actualizaron ${cambiosRealizados} estatus por seguimiento.`);
 }
 
 /**
