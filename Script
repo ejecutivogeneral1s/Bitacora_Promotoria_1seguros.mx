@@ -79,7 +79,7 @@ function onOpen() {
 }
 
 /**
- * REVISA FECHA DE PRÓXIMO SEGUIMIENTO Y ACTUALIZA ESTATUS AUTOMÁTICAMENTE
+ * REVISA FECHA DE PRÓXIMO SEGUIMIENTO Y ACTUALIZA ESTATUS AUTOMÁTICAMENTE (OPTIMIZADO EN LOTE)
  */
 function actualizarEstatusPorSeguimiento() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -93,8 +93,16 @@ function actualizarEstatusPorSeguimiento() {
   const lastRow = sheet.getLastRow();
   if (lastRow < startRow) return;
 
+  const colEstatusIdx = mapa["Estatus"];
+  if (colEstatusIdx === undefined) return;
+
   const numColumnas = sheet.getLastColumn();
   const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, numColumnas).getValues();
+
+  // Matriz para actualizar toda la columna de Estatus de una sola vez
+  let matrizEstatus = data.map(fila => [fila[colEstatusIdx]]);
+  let logsAInsertar = [];
+  const fechaActual = new Date();
 
   // Fecha actual normalizada a media noche (00:00:00)
   const hoy = new Date();
@@ -104,9 +112,8 @@ function actualizarEstatusPorSeguimiento() {
 
   for (let i = 0; i < data.length; i++) {
     let rowData = data[i];
-    let currentRow = startRow + i;
 
-    let estatusActual = rowData[mapa["Estatus"]];
+    let estatusActual = rowData[colEstatusIdx];
     let estatusLimpio = estatusActual ? estatusActual.toString().trim() : "";
 
     // Si la tarea está cerrada (o en config.cierre), se omite
@@ -135,21 +142,36 @@ function actualizarEstatusPorSeguimiento() {
       }
     }
 
-    // Solo actualizar si hay un cambio real de estatus
+    // Solo registrar si hay un cambio real de estatus
     if (nuevoEstatus && nuevoEstatus !== estatusLimpio) {
-      sheet.getRange(currentRow, mapa["Estatus"] + 1).setValue(nuevoEstatus);
+      matrizEstatus[i][0] = nuevoEstatus;
 
       let tipo = rowData[mapa["Tipo"]];
       let responsable = rowData[mapa["Responsable"]];
       let descripcion = rowData[mapa["Descripcion y comentarios"]];
 
-      registrarEnLog(
-        tipo,
-        responsable,
-        descripcion,
+      logsAInsertar.push([
+        fechaActual,
+        tipo ? tipo.toString() : "",
+        responsable ? responsable.toString() : "",
+        descripcion ? descripcion.toString() : "",
         `Estatus actualizado de '${estatusLimpio}' a '${nuevoEstatus}' por fecha de Prox. Seguimiento`
-      );
+      ]);
+
       cambiosRealizados++;
+    }
+  }
+
+  if (cambiosRealizados > 0) {
+    // Escribir los cambios de Estatus en lote (1 sola llamada a la API)
+    sheet.getRange(startRow, colEstatusIdx + 1, matrizEstatus.length, 1).setValues(matrizEstatus);
+
+    // Escribir logs en lote (1 sola llamada a la API)
+    if (logsAInsertar.length > 0) {
+      const hojaLog = ss.getSheetByName("Log_Bot");
+      if (hojaLog) {
+        hojaLog.getRange(hojaLog.getLastRow() + 1, 1, logsAInsertar.length, 5).setValues(logsAInsertar);
+      }
     }
   }
 
