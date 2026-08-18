@@ -110,8 +110,19 @@ function actualizarEstatusPorSeguimiento() {
 
   let cambiosRealizados = 0;
 
+  const colDescIdx = mapa["Descripcion y comentarios"];
+
   for (let i = 0; i < data.length; i++) {
     let rowData = data[i];
+
+    // Verificar si tiene contenido en 'Descripcion y comentarios'
+    let descripcionVal = colDescIdx !== undefined ? rowData[colDescIdx] : "";
+    let descripcionLimpia = descripcionVal ? descripcionVal.toString().trim() : "";
+
+    // Si no tiene contenido en 'Descripcion y comentarios', se omite la fila
+    if (!descripcionLimpia) {
+      continue;
+    }
 
     let estatusActual = rowData[colEstatusIdx];
     let estatusLimpio = estatusActual ? estatusActual.toString().trim() : "";
